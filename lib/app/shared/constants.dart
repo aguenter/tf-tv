@@ -16,7 +16,7 @@ class AppConstants {
   static const int countdownSeconds = 5;
 
   // Anzeigedauer des Ergebnis-Screens (T6) in Sekunden.
-  static const int resultDisplaySeconds = 10;
+  static const int resultDisplaySeconds = 60;
 
   // Anzeigedauer des Abschluss-Screens (T7) in Sekunden, danach geht der
   // TV zurück zu T1 und startet eine neue Session.

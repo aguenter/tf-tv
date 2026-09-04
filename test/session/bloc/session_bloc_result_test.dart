@@ -84,7 +84,7 @@ void main() {
       });
     });
 
-    test('nach 10 s Anzeigedauer wird endSession() genau einmal aufgerufen (T6-T2)',
+    test('nach 60 s Anzeigedauer wird endSession() genau einmal aufgerufen (T6-T2)',
         () {
       fakeAsync((async) {
         final service = ScriptedSessionService();
