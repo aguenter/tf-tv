@@ -40,3 +40,13 @@ class CountdownTick extends SessionEvent {
 class ExerciseTick extends SessionEvent {
   const ExerciseTick();
 }
+
+/// Die App/der Tab ist wieder sichtbar (Page Visibility → `resumed`).
+///
+/// Browser drosseln oder pausieren Timer im Hintergrund, wodurch der Tick
+/// ausbleibt und die angezeigte Restzeit einfrieren würde. Der Handler rechnet
+/// die Restzeit aus dem gespeicherten Ziel-Zeitpunkt neu und korrigiert die
+/// Anzeige sofort beim Zurückkehren.
+class LifecycleResumed extends SessionEvent {
+  const LifecycleResumed();
+}

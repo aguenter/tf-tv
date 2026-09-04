@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../app/shared/constants.dart';
@@ -28,13 +29,18 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
   SessionBloc({
     required SessionService sessionService,
     required WorkoutService workoutService,
-  })  : _sessionService = sessionService,
-        _workoutService = workoutService,
-        super(const SessionCreatingState()) {
+  }) : _sessionService = sessionService,
+       _workoutService = workoutService,
+       super(const SessionCreatingState()) {
     on<SessionStarted>(_onSessionStarted);
     on<SessionUpdateReceived>(_onUpdateReceived);
-    on<CountdownTick>(_onCountdownTick);
-    on<ExerciseTick>(_onExerciseTick);
+    // Ticks und Wiedererscheinen laufen in dieselbe Neuberechnung: Die
+    // Restzeit ergibt sich stets aus dem Ziel-Zeitpunkt, nicht aus einem
+    // Herunterzählen – so korrigieren sich verschluckte Ticks (Hintergrund-
+    // Throttling) von selbst.
+    on<CountdownTick>(_recomputeRemaining);
+    on<ExerciseTick>(_recomputeRemaining);
+    on<LifecycleResumed>(_recomputeRemaining);
     _clock = SessionPhaseClock(this, sessionService);
     _sessionSubscription = _sessionService.updates.listen(
       (update) => add(SessionUpdateReceived(update)),
@@ -51,6 +57,12 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
   String? _trainerWorkoutId;
   List<Workout> _workouts = [];
   List<Result> _results = [];
+
+  /// Ziel-Zeitpunkt der laufenden Timer-Phase (T3–T5b). `null`, sobald keine
+  /// Phase mit Timer aktiv ist oder die Phase abgelaufen ist. Die Restzeit
+  /// wird stets hieraus berechnet ([_remainingSeconds]), damit sie auch nach
+  /// Hintergrund-Throttling korrekt bleibt.
+  DateTime? _phaseDeadline;
 
   /// Challenge-Übungen in Ausführungs-Reihenfolge (ohne Warm-up) – Basis für
   /// die je-Übung-Aggregation auf T6.
@@ -70,10 +82,9 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     final session = await _sessionService.createSession();
     if (emit.isDone) return; // Handler wurde inzwischen abgebrochen (Close).
 
-    emit(SessionWaitingState(
-      sessionId: session.id,
-      participants: _participants,
-    ));
+    emit(
+      SessionWaitingState(sessionId: session.id, participants: _participants),
+    );
   }
 
   Future<void> _onUpdateReceived(
@@ -157,6 +168,7 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
 
   void _startCountdown(String workoutName, Emitter<SessionState> emit) {
     _clock.cancelAll();
+    _armPhaseDeadline(AppConstants.countdownSeconds);
     emit(
       SessionCountdownState(
         workoutName: workoutName,
@@ -168,20 +180,26 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
 
   void _startWarmup(Exercise exercise, Emitter<SessionState> emit) {
     _clock.cancelAll();
-    emit(SessionWarmupState(
-      exercise: exercise,
-      secondsRemaining: exercise.executionSeconds,
-    ));
+    _armPhaseDeadline(exercise.executionSeconds);
+    emit(
+      SessionWarmupState(
+        exercise: exercise,
+        secondsRemaining: exercise.executionSeconds,
+      ),
+    );
     _clock.startExercise();
   }
 
   void _startExerciseDisplay(Exercise exercise, Emitter<SessionState> emit) {
     _clock.cancelAll();
     _trackChallengeExercise(exercise);
-    emit(SessionExerciseState(
-      exercise: exercise,
-      secondsRemaining: exercise.executionSeconds,
-    ));
+    _armPhaseDeadline(exercise.executionSeconds);
+    emit(
+      SessionExerciseState(
+        exercise: exercise,
+        secondsRemaining: exercise.executionSeconds,
+      ),
+    );
     _clock.startExercise();
   }
 
@@ -189,21 +207,25 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     _clock.cancelAll();
     _trackChallengeExercise(exercise);
     final seconds = exercise.inputWindowSeconds;
-    emit(SessionRestState(
-      exercise: exercise,
-      secondsRemaining: seconds,
-      totalSeconds: seconds,
-      participants: _participants,
-      submittedParticipantIds: const {},
-    ));
+    _armPhaseDeadline(seconds);
+    emit(
+      SessionRestState(
+        exercise: exercise,
+        secondsRemaining: seconds,
+        totalSeconds: seconds,
+        participants: _participants,
+        submittedParticipantIds: const {},
+      ),
+    );
     _clock.startExercise();
   }
 
   /// Merkt sich eine Challenge-Übung (ohne Duplikate) in Ausführungs-
   /// Reihenfolge – Grundlage für die je-Übung-Aggregation auf T6.
   void _trackChallengeExercise(Exercise exercise) {
-    final alreadyTracked =
-        _challengeExercises.any((tracked) => tracked.id == exercise.id);
+    final alreadyTracked = _challengeExercises.any(
+      (tracked) => tracked.id == exercise.id,
+    );
     if (!alreadyTracked) {
       _challengeExercises.add(exercise);
     }
@@ -212,8 +234,10 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
   /// T6 – Ergebnis-Screen; nach der Anzeigedauer wird die Session beendet.
   void _enterResult(Emitter<SessionState> emit) {
     final summary = ResultSummary.from(_results);
-    final challengeResults =
-        ChallengeResults.aggregate(_challengeExercises, _results);
+    final challengeResults = ChallengeResults.aggregate(
+      _challengeExercises,
+      _results,
+    );
     _clock.cancelAll();
     emit(
       SessionResultState(
@@ -235,57 +259,74 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
   }
 
   // ------------------------------------------------------------------
-  // Phasen-Ticks (Timer-Ablauf als Event)
+  // Phasen-Timer (Restzeit aus Ziel-Zeitpunkt)
   // ------------------------------------------------------------------
 
-  /// T3: Countdown-Tick. Bei 0 ruft der TV `advancePhase()` auf (→ T4).
-  void _onCountdownTick(CountdownTick event, Emitter<SessionState> emit) {
-    final current = state;
-    if (current is! SessionCountdownState) return; // Verirrter Tick.
-
-    final remaining = current.secondsRemaining - 1;
-    if (remaining <= 0) {
-      _clock.stopPhaseTimer();
-      unawaited(_sessionService.advancePhase());
-    } else {
-      emit(
-        SessionCountdownState(
-          workoutName: current.workoutName,
-          secondsRemaining: remaining,
-        ),
-      );
-    }
+  /// Legt den Ziel-Zeitpunkt der aktuellen Timer-Phase fest.
+  ///
+  /// [clock] statt `DateTime.now()`: In Tests (`fakeAsync`) läuft die simulierte
+  /// Zeit über das `clock`-Paket, sodass `async.elapse` sowohl Timer als auch
+  /// diese Berechnung vorspult.
+  void _armPhaseDeadline(int seconds) {
+    _phaseDeadline = clock.now().add(Duration(seconds: seconds));
   }
 
-  void _onExerciseTick(ExerciseTick event, Emitter<SessionState> emit) {
+  /// Verbleibende ganze Sekunden bis zum Ziel-Zeitpunkt (aufgerundet, damit die
+  /// Startsekunde die volle Dauer anzeigt). 0, wenn keine Phase läuft oder die
+  /// Zeit abgelaufen ist.
+  int _remainingSeconds() {
+    final deadline = _phaseDeadline;
+    if (deadline == null) return 0;
+    final ms = deadline.difference(clock.now()).inMilliseconds;
+    return ms <= 0 ? 0 : (ms / 1000).ceil();
+  }
+
+  /// Rechnet die Restzeit der laufenden Timer-Phase neu und emittiert sie.
+  ///
+  /// Gemeinsamer Handler für [CountdownTick], [ExerciseTick] und
+  /// [LifecycleResumed]. Da die Restzeit aus [_phaseDeadline] stammt, gleicht
+  /// jeder Aufruf verschluckte Ticks (Hintergrund-Throttling) automatisch aus.
+  /// Bei 0 ruft der TV als Session-Treiber genau einmal `advancePhase()` auf –
+  /// [_phaseDeadline] wird auf `null` gesetzt, damit ein Folge-Event nicht
+  /// erneut auslöst.
+  void _recomputeRemaining(SessionEvent event, Emitter<SessionState> emit) {
     final current = state;
-    if (current is SessionWarmupState) {
-      final remaining = current.secondsRemaining - 1;
-      if (remaining <= 0) {
-        _clock.stopPhaseTimer();
-        unawaited(_sessionService.advancePhase());
-      } else {
-        emit(SessionWarmupState(
-          exercise: current.exercise,
-          secondsRemaining: remaining,
-        ));
-      }
-    } else if (current is SessionExerciseState) {
-      final remaining = current.secondsRemaining - 1;
-      if (remaining <= 0) {
-        _clock.stopPhaseTimer();
-        unawaited(_sessionService.advancePhase());
-      } else {
+    final isTimedPhase =
+        current is SessionCountdownState ||
+        current is SessionWarmupState ||
+        current is SessionExerciseState ||
+        current is SessionRestState;
+    if (!isTimedPhase || _phaseDeadline == null) return;
+
+    final remaining = _remainingSeconds();
+    if (remaining <= 0) {
+      _phaseDeadline = null;
+      _clock.stopPhaseTimer();
+      unawaited(_sessionService.advancePhase());
+      return;
+    }
+
+    switch (current) {
+      case SessionCountdownState():
+        emit(
+          SessionCountdownState(
+            workoutName: current.workoutName,
+            secondsRemaining: remaining,
+          ),
+        );
+      case SessionWarmupState():
+        emit(
+          SessionWarmupState(
+            exercise: current.exercise,
+            secondsRemaining: remaining,
+          ),
+        );
+      case SessionExerciseState():
         emit(current.copyWith(secondsRemaining: remaining));
-      }
-    } else if (current is SessionRestState) {
-      final remaining = current.secondsRemaining - 1;
-      if (remaining <= 0) {
-        _clock.stopPhaseTimer();
-        unawaited(_sessionService.advancePhase());
-      } else {
+      case SessionRestState():
         emit(current.copyWith(secondsRemaining: remaining));
-      }
+      default:
+        break;
     }
   }
 
@@ -310,7 +351,10 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
       ),
     );
 
-    final submitted = {...current.submittedParticipantIds, update.participant.id};
+    final submitted = {
+      ...current.submittedParticipantIds,
+      update.participant.id,
+    };
     emit(current.copyWith(submittedParticipantIds: submitted));
   }
 

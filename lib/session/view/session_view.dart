@@ -3,6 +3,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import 'package:supabase/supabase.dart' hide Session;
 
+import '../../app/shared/lifecycle_reporter.dart';
 import '../../app/shared/loading_indicator.dart';
 import '../bloc/session_bloc.dart';
 import '../bloc/session_event.dart';
@@ -38,71 +39,89 @@ class SessionView extends StatelessWidget {
           workoutService: workoutService,
         )..add(const SessionStarted());
       },
-      child: BlocBuilder<SessionBloc, SessionState>(
-        builder: (context, state) {
-          return Scaffold(
-            body: switch (state) {
-              SessionCreatingState() => const LoadingIndicator(),
-              SessionWaitingState(
-                  :final sessionId,
-                  :final participants) => T1StartView(
-                    sessionId: sessionId,
-                    participants: participants,
-                  ),
-              SessionSelectionState(
-                :final workouts,
-                :final votes,
-                :final participants,
-                :final trainerWorkoutId,
-              ) => T2SelectionView(
-                  workouts: workouts,
-                  votes: votes,
-                  participants: participants,
-                  trainerWorkoutId: trainerWorkoutId,
-                ),
-              SessionCountdownState(
-                  :final workoutName, :final secondsRemaining) => T3CountdownView(
-                    workoutName: workoutName,
-                    secondsRemaining: secondsRemaining,
-                  ),
-              SessionWarmupState(:final exercise, :final secondsRemaining) =>
-                T4WarmupView(
-                  exercise: exercise,
-                  secondsRemaining: secondsRemaining,
-                ),
-              SessionExerciseState(
-                :final exercise,
-                :final secondsRemaining,
-              ) => T5ExerciseView(
-                  exercise: exercise,
-                  secondsRemaining: secondsRemaining,
-                ),
-              SessionRestState(
-                :final exercise,
-                :final secondsRemaining,
-                :final totalSeconds,
-                :final participants,
-                :final submittedParticipantIds,
-              ) => T5bRestView(
-                  exercise: exercise,
-                  secondsRemaining: secondsRemaining,
-                  totalSeconds: totalSeconds,
-                  participants: participants,
-                  submittedParticipantIds: submittedParticipantIds,
-                ),
-              SessionResultState(
-                :final participants,
-                :final teamTotal,
-                :final exerciseResults,
-              ) => T6ResultView(
-                  participants: participants,
-                  teamTotal: teamTotal,
-                  exerciseResults: exerciseResults,
-                ),
-              SessionEndedState() => const T7EndView(),
+      // Builder, damit der Kontext unterhalb des BlocProvider liegt und den
+      // SessionBloc lesen kann; LifecycleReporter stößt beim Wiedererscheinen
+      // die sofortige Restzeit-Neuberechnung an.
+      child: Builder(
+        builder: (context) => LifecycleReporter(
+          onResume: () =>
+              context.read<SessionBloc>().add(const LifecycleResumed()),
+          child: BlocBuilder<SessionBloc, SessionState>(
+            builder: (context, state) {
+              return Scaffold(
+                body: switch (state) {
+                  SessionCreatingState() => const LoadingIndicator(),
+                  SessionWaitingState(:final sessionId, :final participants) =>
+                    T1StartView(
+                      sessionId: sessionId,
+                      participants: participants,
+                    ),
+                  SessionSelectionState(
+                    :final workouts,
+                    :final votes,
+                    :final participants,
+                    :final trainerWorkoutId,
+                  ) =>
+                    T2SelectionView(
+                      workouts: workouts,
+                      votes: votes,
+                      participants: participants,
+                      trainerWorkoutId: trainerWorkoutId,
+                    ),
+                  SessionCountdownState(
+                    :final workoutName,
+                    :final secondsRemaining,
+                  ) =>
+                    T3CountdownView(
+                      workoutName: workoutName,
+                      secondsRemaining: secondsRemaining,
+                    ),
+                  SessionWarmupState(
+                    :final exercise,
+                    :final secondsRemaining,
+                  ) =>
+                    T4WarmupView(
+                      exercise: exercise,
+                      secondsRemaining: secondsRemaining,
+                    ),
+                  SessionExerciseState(
+                    :final exercise,
+                    :final secondsRemaining,
+                  ) =>
+                    T5ExerciseView(
+                      exercise: exercise,
+                      secondsRemaining: secondsRemaining,
+                    ),
+                  SessionRestState(
+                    :final exercise,
+                    :final secondsRemaining,
+                    :final totalSeconds,
+                    :final participants,
+                    :final submittedParticipantIds,
+                  ) =>
+                    T5bRestView(
+                      exercise: exercise,
+                      secondsRemaining: secondsRemaining,
+                      totalSeconds: totalSeconds,
+                      participants: participants,
+                      submittedParticipantIds: submittedParticipantIds,
+                    ),
+                  SessionResultState(
+                    :final participants,
+                    :final teamTotal,
+                    :final exerciseResults,
+                  ) =>
+                    T6ResultView(
+                      participants: participants,
+                      teamTotal: teamTotal,
+                      exerciseResults: exerciseResults,
+                    ),
+                  SessionEndedState() => const T7EndView(),
+                },
+              );
             },
-          );
-        },
+          ),
+        ),
       ),
     );
   }

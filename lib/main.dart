@@ -6,6 +6,7 @@ import 'app/service/supabase_service.dart';
 import 'app/shared/constants.dart';
 import 'app/shared/router.dart';
 import 'app/shared/theme.dart';
+import 'app/shared/wakelock_guard.dart';
 import 'session/service/session_service.dart';
 import 'session/service/supabase_session_service.dart';
 
@@ -21,14 +22,14 @@ void main() async {
   // Anonymous auth gives the TV a stable identity for Realtime channels.
   await supabaseService.client.auth.signInAnonymously();
 
-  final sessionService = SupabaseSessionService(
-    client: supabaseService.client,
-  );
+  final sessionService = SupabaseSessionService(client: supabaseService.client);
 
-  runApp(TeamfitTvApp(
-    supabaseService: supabaseService,
-    sessionService: sessionService,
-  ));
+  runApp(
+    TeamfitTvApp(
+      supabaseService: supabaseService,
+      sessionService: sessionService,
+    ),
+  );
 }
 
 class TeamfitTvApp extends StatelessWidget {
@@ -48,11 +49,13 @@ class TeamfitTvApp extends StatelessWidget {
         RepositoryProvider<SupabaseService>.value(value: supabaseService),
         RepositoryProvider<SessionService>.value(value: sessionService),
       ],
-      child: MaterialApp.router(
-        title: AppConstants.appName,
-        debugShowCheckedModeBanner: false,
-        theme: TeamfitTheme.dark(),
-        routerConfig: appRouter,
+      child: WakelockGuard(
+        child: MaterialApp.router(
+          title: AppConstants.appName,
+          debugShowCheckedModeBanner: false,
+          theme: TeamfitTheme.dark(),
+          routerConfig: appRouter,
+        ),
       ),
     );
   }
